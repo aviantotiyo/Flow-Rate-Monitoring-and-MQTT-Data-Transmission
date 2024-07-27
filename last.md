@@ -1,5 +1,4 @@
 // version : 1.0.0
-// Update version: change count totalVolume, change count NTP time, reset at 00:00
 #include <SPI.h>
 #include <Ethernet.h>
 #include <PubSubClient.h>
@@ -30,19 +29,15 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200); // GMT+7 offset in seconds 
 
 // Interval dan variabel penghitungan
 const unsigned long ONE_MINUTE = 60000;
+const unsigned long FIVE_MINUTES = 300000;
 unsigned long previousMillis = 0;
+unsigned long previousSendMillis = 0;
 unsigned long pulseCount = 0;
 float totalVolume = 0.0;
 
 // Buffer untuk menyimpan flowRate setiap menit
 float flowRateBuffer[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
 int bufferIndex = 0;
-
-// Variabel untuk mengirim data setiap 5 menit berdasarkan NTP
-unsigned long lastSendTime = 0;
-
-// Variabel untuk mereset volume setiap tengah malam
-bool volumeReset = false;
 
 // Fungsi untuk menghubungkan ke server MQTT
 void connectToMQTT() {
@@ -158,7 +153,6 @@ void setup() {
   // Inisialisasi NTP client
   timeClient.begin();
   timeClient.update();
-  lastSendTime = timeClient.getEpochTime();
 }
 
 void loop() {
@@ -175,20 +169,9 @@ void loop() {
     calculateFlowRate();
   }
 
-  // Pengiriman data ke MQTT setiap lima menit berdasarkan NTP time
-  timeClient.update();
-  unsigned long currentEpochTime = timeClient.getEpochTime();
-  if (currentEpochTime >= lastSendTime + 300) { // 300 seconds = 5 minutes
+  // Pengiriman data ke MQTT setiap lima menit
+  if (currentMillis - previousSendMillis >= FIVE_MINUTES) {
+    previousSendMillis = currentMillis;
     sendDataToMQTT();
-    lastSendTime = currentEpochTime - (currentEpochTime % 300); // Reset lastSendTime to the nearest 5 minutes mark
-  }
-
-  // Reset total volume setiap tengah malam (jam 00:00)
-  if (hour(currentEpochTime) == 0 && minute(currentEpochTime) == 0 && !volumeReset) {
-    totalVolume = 0;
-    volumeReset = true;
-    Serial.println("Total Volume reset to 0 at midnight");
-  } else if (hour(currentEpochTime) != 0 || minute(currentEpochTime) != 0) {
-    volumeReset = false;
   }
 }
