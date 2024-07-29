@@ -1,5 +1,7 @@
-// version : 1.0.0
-// Update version: change count totalVolume, change count NTP time, reset at 00:00
+// version : 1.0.1
+// Update version: change count totalVolume, change count NTP time, reset at 00:00:00 WIB
+// - check mqtt server connection at 00:00 sec
+// - send data mqtt server at 00:02 sec
 #include <SPI.h>
 #include <Ethernet.h>
 #include <PubSubClient.h>
@@ -23,7 +25,7 @@ PubSubClient client(ethClient);
 
 // Inisialisasi NTP client
 EthernetUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200); // GMT+7 offset in seconds (7 * 3600)
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200);  // GMT+7 offset in seconds (7 * 3600)
 
 // Pin sensor
 #define SENSOR_PIN 3
@@ -35,14 +37,14 @@ unsigned long pulseCount = 0;
 float totalVolume = 0.0;
 
 // Buffer untuk menyimpan flowRate setiap menit
-float flowRateBuffer[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+float flowRateBuffer[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
 int bufferIndex = 0;
-
-// Variabel untuk mengirim data setiap 5 menit berdasarkan NTP
-unsigned long lastSendTime = 0;
 
 // Variabel untuk mereset volume setiap tengah malam
 bool volumeReset = false;
+
+// Variabel untuk memastikan pengiriman data hanya dilakukan sekali
+bool dataSent = false;
 
 // Fungsi untuk menghubungkan ke server MQTT
 void connectToMQTT() {
@@ -66,12 +68,12 @@ void countPulse() {
 
 // Fungsi untuk menghitung dan menampilkan flow rate
 void calculateFlowRate() {
-  float frequency = (float)pulseCount / (ONE_MINUTE / 1000.0); // Frekuensi pulsa dalam Hz
-  float flowRate = frequency / 5.5; // Flow rate dalam L/min
+  float frequency = (float)pulseCount / (ONE_MINUTE / 1000.0);  // Frekuensi pulsa dalam Hz
+  float flowRate = frequency / 5.5;                             // Flow rate dalam L/min
 
   // Menambahkan flow rate ke buffer
   flowRateBuffer[bufferIndex] = flowRate;
-  bufferIndex = (bufferIndex + 1) % 5; // Mengatur indeks buffer secara melingkar
+  bufferIndex = (bufferIndex + 1) % 5;  // Mengatur indeks buffer secara melingkar
 
   // Menghitung volume yang terukur dalam satu menit
   float volume = flowRate;
@@ -122,13 +124,23 @@ void sendDataToMQTT() {
   Serial.print("Payload Size: ");
   Serial.println(n);
 
-  // Mengirimkan payload JSON ke topik 'data_sensor_flow'
-  if (client.publish("sensor_data_flow", jsonBuffer)) {
-    Serial.println("Publish succeeded");
+  // Mengecek koneksi ke MQTT dan mencoba mengirim payload JSON
+  if (client.connected()) {
+    if (client.publish("sensor_data_flow", jsonBuffer)) {
+      Serial.println("Publish succeeded");
+    } else {
+      Serial.println("Publish failed");
+    }
   } else {
-    Serial.println("Publish failed");
-    Serial.print("MQTT Client State: ");
-    Serial.println(client.state());
+    Serial.println("MQTT not connected, attempting to reconnect");
+    connectToMQTT();  // Mencoba menghubungkan kembali jika tidak terhubung
+
+    // Mencoba mengirim ulang data setelah koneksi berhasil
+    if (client.publish("sensor_data_flow", jsonBuffer)) {
+      Serial.println("Publish succeeded after reconnect");
+    } else {
+      Serial.println("Publish failed after reconnect");
+    }
   }
 
   // Reset buffer setelah pengiriman
@@ -145,7 +157,7 @@ void setup() {
 
   // Inisialisasi Ethernet dengan DHCP
   Ethernet.begin(mac);
-  delay(1500); // Menunggu Ethernet terhubung
+  delay(1500);  // Menunggu Ethernet terhubung
   Serial.print("IP Address: ");
   Serial.println(Ethernet.localIP());
 
@@ -158,15 +170,11 @@ void setup() {
   // Inisialisasi NTP client
   timeClient.begin();
   timeClient.update();
-  lastSendTime = timeClient.getEpochTime();
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  if (!client.connected()) {
-    connectToMQTT();
-  }
   client.loop();  // Pastikan client.loop() dipanggil untuk menjaga koneksi MQTT
 
   // Perhitungan flow rate setiap satu menit
@@ -175,12 +183,26 @@ void loop() {
     calculateFlowRate();
   }
 
-  // Pengiriman data ke MQTT setiap lima menit berdasarkan NTP time
+  // Mengambil waktu sekarang dari NTP
   timeClient.update();
   unsigned long currentEpochTime = timeClient.getEpochTime();
-  if (currentEpochTime >= lastSendTime + 300) { // 300 seconds = 5 minutes
-    sendDataToMQTT();
-    lastSendTime = currentEpochTime - (currentEpochTime % 300); // Reset lastSendTime to the nearest 5 minutes mark
+  unsigned long currentSecond = currentEpochTime % 60;
+
+  // Pemeriksaan koneksi ke MQTT setiap 5 menit pada detik ke-0
+  if (currentSecond == 0 && currentEpochTime % 300 == 0) {
+    if (!client.connected()) {
+      Serial.println("MQTT not connected, attempting to reconnect");
+      connectToMQTT();
+    }
+    dataSent = false;  // Reset flag pengiriman data
+  }
+
+  // Pengiriman data ke MQTT setiap 5 menit 2 detik
+  if (currentSecond == 2 && currentEpochTime % 300 == 2) {
+    if (!dataSent) {
+      sendDataToMQTT();
+      dataSent = true;  // Set flag pengiriman data agar tidak mengirimkan data lebih dari sekali
+    }
   }
 
   // Reset total volume setiap tengah malam (jam 00:00)
